@@ -21,5 +21,30 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      
       - run: pip install -r requirements.txt
+
+      - name: Test Telegram delivery (manual runs only)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import os, requests
+          token = os.environ["TELEGRAM_BOT_TOKEN"]
+          chat_id = os.environ["TELEGRAM_CHAT_ID"]
+          response = requests.post(
+              f"https://api.telegram.org/bot{token}/sendMessage",
+              json={
+                  "chat_id": chat_id,
+                  "text": "✅ Crypto Bull Run Radar test: GitHub Actions can reach your Telegram bot."
+              },
+              timeout=15,
+          )
+          response.raise_for_status()
+          print("Telegram test message sent.")
+          PY
+
       - run: python main.py
+

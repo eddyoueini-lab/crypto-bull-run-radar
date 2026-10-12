@@ -1,5 +1,5 @@
 
-name: Find Telegram Channel ID
+name: Diagnose Telegram Connection
 
 on:
   workflow_dispatch:
@@ -8,49 +8,36 @@ permissions:
   contents: read
 
 jobs:
-  find-channel:
+  diagnose:
     runs-on: ubuntu-latest
     steps:
-      - name: Retrieve channel ID
+      - name: Check webhook status
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
           set -euo pipefail
 
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "Missing TELEGRAM_BOT_TOKEN GitHub secret."
+            exit 1
+          fi
+
           curl -fsS \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates" \
-            -o /tmp/telegram-updates.json
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo" \
+            -o /tmp/webhook.json
 
           python - <<'PY'
           import json
 
-          with open("/tmp/telegram-updates.json") as f:
+          with open("/tmp/webhook.json") as f:
               data = json.load(f)
 
           if not data.get("ok"):
               raise SystemExit("Telegram API request failed.")
 
-          found = set()
-
-          for update in data.get("result", []):
-              post = update.get("channel_post") or \
-                     update.get("edited_channel_post")
-
-              if post:
-                  chat = post.get("chat", {})
-                  if chat.get("type") == "channel":
-                      item = (
-                          str(chat.get("id")),
-                          chat.get("title", "Unknown"),
-                      )
-                      if item not in found:
-                          found.add(item)
-                          print(f"Channel: {item[1]}")
-                          print(f"Chat ID: {item[0]}")
-
-          if not found:
-              print(
-                  "No channel posts found. Publish a fresh "
-                  "channel message and run this workflow again."
-              )
+          info = data["result"]
+          print("Webhook configured:", bool(info.get("url")))
+          print("Pending updates:", info.get("pending_update_count", 0))
+          print("Last webhook error:",
+                info.get("last_error_message") or "None")
           PY

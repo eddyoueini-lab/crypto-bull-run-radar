@@ -1,5 +1,5 @@
 
-name: Diagnose Telegram Connection
+name: Find Telegram Channel ID
 
 on:
   workflow_dispatch:
@@ -8,36 +8,48 @@ permissions:
   contents: read
 
 jobs:
-  diagnose:
+  find-channel:
     runs-on: ubuntu-latest
     steps:
-      - name: Check webhook status
+      - name: Find channel ID
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
           set -euo pipefail
 
-          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
-            echo "Missing TELEGRAM_BOT_TOKEN GitHub secret."
-            exit 1
-          fi
-
           curl -fsS \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo" \
-            -o /tmp/webhook.json
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates" \
+            -o /tmp/updates.json
 
           python - <<'PY'
           import json
 
-          with open("/tmp/webhook.json") as f:
+          with open("/tmp/updates.json") as f:
               data = json.load(f)
 
           if not data.get("ok"):
               raise SystemExit("Telegram API request failed.")
 
-          info = data["result"]
-          print("Webhook configured:", bool(info.get("url")))
-          print("Pending updates:", info.get("pending_update_count", 0))
-          print("Last webhook error:",
-                info.get("last_error_message") or "None")
+          found = set()
+
+          for update in data.get("result", []):
+              post = (
+                  update.get("channel_post")
+                  or update.get("edited_channel_post")
+              )
+
+              if post:
+                  chat = post.get("chat", {})
+                  if chat.get("type") == "channel":
+                      found.add((
+                          str(chat.get("id")),
+                          chat.get("title", "Unknown")
+                      ))
+
+          if found:
+              for chat_id, title in sorted(found):
+                  print("Channel:", title)
+                  print("Chat ID:", chat_id)
+          else:
+              print("No channel posts found in pending updates.")
           PY

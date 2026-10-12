@@ -1,199 +1,74 @@
-import os
-import time
-import requests
-from datetime import datetime, timezone
+import os, time, requests
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "300"))
-COOLDOWN_MINUTES = int(os.getenv("COOLDOWN_MINUTES", "60"))
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 TZ = ZoneInfo("Asia/Dubai")
+SYMBOLS = ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","DOGEUSDT","AVAXUSDT","LINKUSDT","DOTUSDT","KASUSDT","AKTUSDT","FETUSDT","PEPEUSDT","SHIBUSDT","WIFUSDT","SUIUSDT","TAOUSDT","NEARUSDT","RENDERUSDT","INJUSDT","SEIUSDT","APTUSDT","ONDOUSDT","ARBUSDT","OPUSDT","JUPUSDT","BONKUSDT","FLOKIUSDT"]
+BASE = "https://api.binance.com"
 
-# Binance spot symbols. Expand this list whenever you want.
-SYMBOLS = [
-    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
-    "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
-    "KASUSDT", "AKTUSDT", "FETUSDT", "PEPEUSDT", "SHIBUSDT",
-    "WIFUSDT", "SUIUSDT", "TAOUSDT", "NEARUSDT", "RENDERUSDT",
-    "INJUSDT", "SEIUSDT", "APTUSDT", "ONDOUSDT", "ARBUSDT",
-    "OPUSDT", "JUPUSDT", "BONKUSDT", "FLOKIUSDT"
-]
-BASE_URL = "https://api.binance.com"
+def send(text):
+    if not TOKEN or not CHAT_ID:
+        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID GitHub secret.")
+    r = requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+        json={"chat_id": CHAT_ID, "text": text, "disable_web_page_preview": True}, timeout=15)
+    r.raise_for_status()
 
-# Prevent repeat alerts for the same coin/signal type.
-last_alert = {}
+def get_json(path, params):
+    r = requests.get(BASE + path, params=params, timeout=15)
+    r.raise_for_status()
+    return r.json()
 
-def now_local():
-    return datetime.now(TZ)
+def scan(symbol):
+    candles = get_json("/api/v3/klines", {"symbol":symbol, "interval":"15m", "limit":25})
+    if len(candles) < 22: return None
+    close = [float(c[4]) for c in candles]
+    high = [float(c[2]) for c in candles]
+    vol = [float(c[5]) for c in candles]
+    price = close[-1]
+    ch1 = (price / close[-5] - 1) * 100
+    ch4 = (price / close[-17] - 1) * 100
+    avgvol = sum(vol[-21:-1]) / 20
+    vr = vol[-1] / avgvol if avgvol else 0
+    resistance = max(high[-21:-1])
+    breakout = price > resistance
+    ticker = get_json("/api/v3/ticker/24hr", {"symbol":symbol})
+    ch24 = float(ticker.get("priceChangePercent", 0))
+    score, reasons = 0, []
+    if ch1 > 1: score += 15; reasons.append(f"~1h momentum +{ch1:.2f}%")
+    if ch4 > 2: score += 20; reasons.append(f"4h momentum +{ch4:.2f}%")
+    if vr >= 1.8: score += 25; reasons.append(f"volume {vr:.1f}x recent average")
+    if breakout: score += 25; reasons.append("price above prior ~5h high")
+    if price > sum(close[-5:-1])/4: score += 10; reasons.append("above recent short-term average")
+    if ch24 > 5: score += 5; reasons.append(f"24h change +{ch24:.1f}%")
+    bearish = ch1 < -2 or (ch4 < -4 and vr >= 1.8)
+    if score < 45 and not bearish: return None
+    kind = ("DOWNSIDE / FAILED-MOMENTUM WARNING" if bearish and score < 45 else
+            "BREAKOUT CANDIDATE" if breakout and vr >= 1.8 else "EARLY MOMENTUM WARNING")
+    return (score, f"{'⚠️' if bearish else '🚨'} CRYPTO BULL RUN RADAR\n{kind}\n"
+        f"Coin: {symbol}\nScore: {score}/100\nPrice: {price:.8g} USDT\n"
+        f"24h: {ch24:+.2f}% | Volume vs average: {vr:.1f}x\n"
+        f"Reference level: {resistance:.8g} USDT\nSignals: " + (", ".join(reasons) if reasons else f"1h {ch1:.2f}%; 4h {ch4:.2f}%") +
+        f"\nTime: {datetime.now(TZ).strftime('%Y-%m-%d %H:%M GST')}\n\n"
+        "Rule-based screening only, not financial advice. Verify candle close, liquidity and news.")
 
-def telegram_send(text):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram credentials are missing; message not sent.")
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    response = requests.post(
-        url,
-        json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "disable_web_page_preview": True},
-        timeout=15,
-    )
-    response.raise_for_status()
-
-def get_klines(symbol, interval="15m", limit=30):
-    response = requests.get(
-        f"{BASE_URL}/api/v3/klines",
-        params={"symbol": symbol, "interval": interval, "limit": limit},
-        timeout=15,
-    )
-    response.raise_for_status()
-    return response.json()
-
-def get_ticker(symbol):
-    response = requests.get(
-        f"{BASE_URL}/api/v3/ticker/24hr",
-        params={"symbol": symbol},
-        timeout=15,
-    )
-    response.raise_for_status()
-    return response.json()
-
-def evaluate(symbol):
-    # Use 15-minute candles; the last candle may still be forming.
-    candles = get_klines(symbol, "15m", 25)
-    if len(candles) < 22:
-        return None
-
-    # Each kline: open time, open, high, low, close, volume, ...
-    closes = [float(c[4]) for c in candles]
-    highs = [float(c[2]) for c in candles]
-    volumes = [float(c[5]) for c in candles]
-
-    latest_close = closes[-1]
-    prior_closes = closes[-5:-1]
-    previous_highs = highs[-21:-1]
-    recent_volumes = volumes[-21:-1]
-    avg_volume = sum(recent_volumes) / len(recent_volumes) if recent_volumes else 0
-    volume_ratio = volumes[-1] / avg_volume if avg_volume else 0
-    change_1h = ((latest_close / closes[-5]) - 1) * 100 if closes[-5] else 0
-    change_4h = ((latest_close / closes[-17]) - 1) * 100 if closes[-17] else 0
-    resistance = max(previous_highs) if previous_highs else latest_close
-    breakout = latest_close > resistance
-    momentum = latest_close > sum(prior_closes) / len(prior_closes)
-    ticker = get_ticker(symbol)
-    change_24h = float(ticker.get("priceChangePercent", 0))
-    quote_volume = float(ticker.get("quoteVolume", 0))
-
-    score = 0
-    reasons = []
-    if change_1h > 1.0:
-        score += 15
-        reasons.append(f"15m momentum: +{change_1h:.2f}% over ~1h")
-    if change_4h > 2.0:
-        score += 20
-        reasons.append(f"4h momentum: +{change_4h:.2f}%")
-    if volume_ratio >= 1.8:
-        score += 25
-        reasons.append(f"volume spike: {volume_ratio:.1f}× recent average")
-    if breakout:
-        score += 25
-        reasons.append("15m close above the prior 5h high")
-    if momentum:
-        score += 10
-        reasons.append("short-term price above recent average")
-    if change_24h > 5:
-        score += 5
-        reasons.append(f"24h change: +{change_24h:.1f}%")
-
-    # A simple warning flag; this is a screening signal, not a prediction.
-    bearish = change_1h < -2.0 or (change_4h < -4.0 and volume_ratio >= 1.8)
-    if score >= 45:
-        kind = "CONFIRMED BREAKOUT CANDIDATE" if breakout and volume_ratio >= 1.8 else "EARLY MOMENTUM WARNING"
-        return {
-            "kind": kind, "score": score, "symbol": symbol,
-            "price": latest_close, "change_24h": change_24h,
-            "volume_ratio": volume_ratio, "quote_volume": quote_volume,
-            "reasons": reasons, "bearish": bearish, "resistance": resistance
-        }
-    if bearish:
-        return {
-            "kind": "DOWNSIDE / FAILED-MOMENTUM WARNING", "score": score,
-            "symbol": symbol, "price": latest_close, "change_24h": change_24h,
-            "volume_ratio": volume_ratio, "quote_volume": quote_volume,
-            "reasons": [f"1h change {change_1h:.2f}%; 4h change {change_4h:.2f}%"],
-            "bearish": True, "resistance": resistance
-        }
-    return None
-
-def format_alert(signal):
-    stamp = now_local().strftime("%Y-%m-%d %H:%M GST")
-    direction = "⚠️" if signal["bearish"] else "🚨"
-    reasons = "\n".join(f"• {r}" for r in signal["reasons"])
-    return (
-        f"{direction} CRYPTO BULL RUN RADAR\n"
-        f"{signal['kind']}\n"
-        f"Coin: {signal['symbol']}\n"
-        f"Score: {signal['score']}/100\n"
-        f"Price: {signal['price']:.8g} USDT\n"
-        f"24h: {signal['change_24h']:+.2f}% | Volume vs avg: {signal['volume_ratio']:.1f}×\n"
-        f"Approx. 24h quote volume: ${signal['quote_volume']:,.0f}\n"
-        f"Signals:\n{reasons}\n"
-        f"Reference level: {signal['resistance']:.8g} USDT\n"
-        f"Time: {stamp}\n\n"
-        "Screening alert only—not financial advice. Confirm liquidity, news, and candle close before acting."
-    )
-
-def should_send(signal):
-    key = (signal["symbol"], signal["kind"])
-    now = time.time()
-    previous = last_alert.get(key, 0)
-    if now - previous < COOLDOWN_MINUTES * 60:
-        return False
-    last_alert[key] = now
-    return True
-
-def run_scan():
+def main():
+    if not TOKEN or not CHAT_ID: raise SystemExit("Set Telegram secrets in GitHub repository settings.")
+    print("Radar scan started", datetime.now(TZ).isoformat())
     signals = []
     for symbol in SYMBOLS:
         try:
-            result = evaluate(symbol)
-            if result:
-                signals.append(result)
-        except requests.HTTPError as exc:
-            print(f"{symbol}: HTTP error: {exc}")
-        except Exception as exc:
-            print(f"{symbol}: scan error: {exc}")
-        time.sleep(0.15)  # be gentle with public API rate limits
+            result = scan(symbol)
+            if result: signals.append(result)
+        except Exception as e:
+            print(symbol, "scan error:", e)
+        time.sleep(0.12)
+    signals.sort(reverse=True, key=lambda x: x[0])
+    for _, message in signals:
+        print(message)
+        try: send(message)
+        except Exception as e: print("Telegram send error:", e)
+    if not signals: print("No alert thresholds met.")
 
-    signals.sort(key=lambda item: item["score"], reverse=True)
-    for signal in signals:
-        if should_send(signal):
-            message = format_alert(signal)
-            print(message)
-            try:
-                telegram_send(message)
-            except Exception as exc:
-                print(f"Telegram send failed: {exc}")
-
-    if not signals:
-        print(f"{now_local().isoformat()} — scan complete; no alert thresholds met.")
-
-def main():
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("ERROR: Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment variables.")
-        raise SystemExit(1)
-
-    print("Crypto Bull Run Radar started.")
-    print(f"Checking {len(SYMBOLS)} symbols every {CHECK_INTERVAL_SECONDS}s.")
-    telegram_send(
-        "✅ Crypto Bull Run Radar is online.\n"
-        f"Monitoring {len(SYMBOLS)} crypto pairs; scan interval {CHECK_INTERVAL_SECONDS // 60} minutes.\n"
-        "Signals are technical screening alerts, not guaranteed predictions."
-    )
-    while True:
-        started = time.time()
-        run_scan()
-        elapsed = time.time() - started
-        time.sleep(max(10, CHECK_INTERVAL_SECONDS - elapsed))
-
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()

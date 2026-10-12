@@ -6,7 +6,7 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 TZ = ZoneInfo("Asia/Dubai")
 SYMBOLS = ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","DOGEUSDT","AVAXUSDT","LINKUSDT","DOTUSDT","KASUSDT","AKTUSDT","FETUSDT","PEPEUSDT","SHIBUSDT","WIFUSDT","SUIUSDT","TAOUSDT","NEARUSDT","RENDERUSDT","INJUSDT","SEIUSDT","APTUSDT","ONDOUSDT","ARBUSDT","OPUSDT","JUPUSDT","BONKUSDT","FLOKIUSDT"]
-BASE = "https://api.binance.com"
+BASE = "https://data-api.binance.vision"
 
 def send(text):
     if not TOKEN or not CHAT_ID:
